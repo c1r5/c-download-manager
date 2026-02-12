@@ -50,6 +50,7 @@ struct DownloadEvent {
     size_t bytes_downloaded;
     size_t total_bytes;
     double elapsed_seconds;
+    int thread_id = -1;
 };
 
 #endif //CDOWNLOAD_MANAGER_STRUCTS_H

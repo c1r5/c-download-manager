@@ -45,10 +45,18 @@ static std::string status_to_string(DownloadStatus s) {
 
 void DownloadManagerUI::on_update(const DownloadEvent& event) {
     std::lock_guard lock(mutex_);
-    status_ = event.status;
-    bytes_downloaded_ = event.bytes_downloaded;
-    total_bytes_ = event.total_bytes;
-    elapsed_seconds_ = event.elapsed_seconds;
+
+    if (event.thread_id >= 0) {
+        auto& ts = threads_[event.thread_id];
+        ts.status = event.status;
+        ts.bytes_downloaded = event.bytes_downloaded;
+        ts.total_bytes = event.total_bytes;
+        ts.elapsed_seconds = event.elapsed_seconds;
+    } else {
+        status_ = event.status;
+        total_bytes_ = event.total_bytes;
+        elapsed_seconds_ = event.elapsed_seconds;
+    }
 
     if (screen_) {
         screen_->Post(Event::Custom);
@@ -62,16 +70,29 @@ void DownloadManagerUI::run(const std::string& filename) {
     auto renderer = Renderer([&] {
         std::lock_guard lock(mutex_);
 
+        // Compute total bytes downloaded from all threads
+        size_t total_downloaded = 0;
+        for (const auto& [id, ts] : threads_) {
+            total_downloaded += ts.bytes_downloaded;
+        }
+
+        size_t total = total_bytes_;
+        if (total == 0) {
+            for (const auto& [id, ts] : threads_) {
+                total += ts.total_bytes;
+            }
+        }
+
         float progress = 0.0f;
-        if (total_bytes_ > 0) {
-            progress = static_cast<float>(bytes_downloaded_) /
-                       static_cast<float>(total_bytes_);
+        if (total > 0) {
+            progress = static_cast<float>(total_downloaded) /
+                       static_cast<float>(total);
         }
         int percent = static_cast<int>(progress * 100);
 
         std::string status_str = status_to_string(status_);
-        std::string downloaded_str = format_bytes(bytes_downloaded_);
-        std::string total_str = format_bytes(total_bytes_);
+        std::string downloaded_str = format_bytes(total_downloaded);
+        std::string total_str = format_bytes(total);
         std::string time_str = format_time(elapsed_seconds_);
 
         Elements content;
@@ -80,6 +101,8 @@ void DownloadManagerUI::run(const std::string& filename) {
         content.push_back(text("  Arquivo: " + filename));
         content.push_back(text("  Status:  " + status_str));
         content.push_back(text(""));
+
+        // Total progress
         content.push_back(
             hbox({
                 text("  "),
@@ -90,6 +113,39 @@ void DownloadManagerUI::run(const std::string& filename) {
         content.push_back(
             text("  " + downloaded_str + " / " + total_str + " | " + time_str)
         );
+
+        // Per-thread progress
+        if (!threads_.empty()) {
+            content.push_back(text(""));
+            content.push_back(separator());
+            content.push_back(text("  Threads") | bold | dim);
+
+            for (const auto& [id, ts] : threads_) {
+                float t_progress = 0.0f;
+                if (ts.total_bytes > 0) {
+                    t_progress = static_cast<float>(ts.bytes_downloaded) /
+                                 static_cast<float>(ts.total_bytes);
+                }
+                int t_percent = static_cast<int>(t_progress * 100);
+
+                std::string label = "  #" + std::to_string(id);
+
+                Color bar_color = Color::Blue;
+                if (ts.status == FINISHED) bar_color = Color::Green;
+                else if (ts.status == FAILED) bar_color = Color::Red;
+
+                content.push_back(
+                    hbox({
+                        text(label) | size(WIDTH, EQUAL, 6),
+                        gauge(t_progress) | flex | color(bar_color),
+                        text(" " + std::to_string(t_percent) + "%") | size(WIDTH, EQUAL, 5),
+                        text(" " + format_bytes(ts.bytes_downloaded) + "/" +
+                             format_bytes(ts.total_bytes)),
+                    })
+                );
+            }
+        }
+
         content.push_back(text(""));
 
         if (confirming_exit_) {

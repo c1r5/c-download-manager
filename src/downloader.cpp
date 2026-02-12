@@ -47,7 +47,7 @@ PreDownloadInfo PreDownloadInfo::check_info(const std::string &url, const bool &
 
 void SingleDownloader::download(const DownloadOptions &options) {
 	auto start = std::chrono::steady_clock::now();
-	emit({STARTED, 0, options.c_size, 0.0});
+	emit({STARTED, 0, options.c_size, 0.0, 0});
 
 	std::ofstream ofs(options.out, std::ios::binary);
 
@@ -59,9 +59,11 @@ void SingleDownloader::download(const DownloadOptions &options) {
 
 	if (const cpr::Response response = cpr::Download(ofs, cpr::Url{options.url }); response.status_code == 200) {
 		double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+		emit({FINISHED, options.c_size, options.c_size, elapsed, 0});
 		emit({FINISHED, options.c_size, options.c_size, elapsed});
 	} else {
 		double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+		emit({FAILED, 0, options.c_size, elapsed, 0});
 		emit({FAILED, 0, options.c_size, elapsed});
 	}
 }
@@ -73,12 +75,20 @@ void ParalellDownloader::download(const DownloadOptions &options) {
   const auto ranges =
       split_ranges(options.c_size, static_cast<size_t>(thread_count));
 
+  // Emit initial state for each thread so the UI knows about them
+  for (int i = 0; i < static_cast<int>(ranges.size()); ++i) {
+    size_t chunk_size = ranges[i].finish_at - ranges[i].resume_from + 1;
+    emit({STARTED, 0, chunk_size, 0.0, i});
+  }
+
   std::vector<std::future<void>> futures;
   futures.reserve(ranges.size());
 
-  for (const auto &r : ranges) {
-    futures.emplace_back(std::async(std::launch::async, [this, &options, r, start] {
+  for (int i = 0; i < static_cast<int>(ranges.size()); ++i) {
+    const auto& r = ranges[i];
+    futures.emplace_back(std::async(std::launch::async, [this, &options, r, start, i] {
       auto thread_start = std::chrono::steady_clock::now();
+      size_t chunk_size = r.finish_at - r.resume_from + 1;
 
       std::string range_value = "bytes=" + std::to_string(r.resume_from) + "-" +
                                 std::to_string(r.finish_at);
@@ -97,9 +107,9 @@ void ParalellDownloader::download(const DownloadOptions &options) {
                    static_cast<std::streamsize>(response.text.size()));
         file.close();
 
-        emit({RUNNING, response.text.size(), options.c_size, thread_elapsed});
+        emit({FINISHED, response.text.size(), chunk_size, thread_elapsed, i});
       } else {
-        emit({FAILED, 0, options.c_size, thread_elapsed});
+        emit({FAILED, 0, chunk_size, thread_elapsed, i});
       }
     }));
   }
