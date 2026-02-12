@@ -9,7 +9,7 @@ namespace fs = std::filesystem;
 
 std::string AppConfig::config_path() {
     const char* home = std::getenv("HOME");
-    fs::path config_dir = fs::path(home ? home : ".") / ".config" / "cdownload-manager";
+    fs::path config_dir = fs::path(".");
     fs::create_directories(config_dir);
     return (config_dir / "config.ini").string();
 }
