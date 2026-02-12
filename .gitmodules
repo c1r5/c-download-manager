@@ -1,6 +1,0 @@
-[submodule "libs/external/argparse"]
-	path = libs/external/argparse
-	url = https://github.com/p-ranav/argparse.git
-[submodule "libs/external/cpr"]
-	path = libs/external/cpr
-	url = https://github.com/libcpr/cpr.git

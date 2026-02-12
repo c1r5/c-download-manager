@@ -6,21 +6,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile commands" FORCE)
 set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "Use system curl")
 
-add_subdirectory(libs/external/cpr)
-add_subdirectory(libs/external/argparse)
-
-file(GLOB SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
-file(GLOB HEADERS ${CMAKE_SOURCE_DIR}/src/*.hpp)
-
-add_executable(
-  app
-  ${SOURCES}
+include(FetchContent)
+FetchContent_Declare(
+  argparse
+  GIT_REPOSITORY https://github.com/p-ranav/argparse.git
+  GIT_TAG v3.2
 )
 
-target_link_libraries(
-  app
+FetchContent_Declare(
+  cpr
+  GIT_REPOSITORY https://github.com/libcpr/cpr.git
+  GIT_TAG 1.11.1
+)
+
+FetchContent_MakeAvailable(argparse cpr)
+
+file(GLOB SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
+
+add_executable(app ${SOURCES})
+
+target_include_directories(app PRIVATE ${CMAKE_SOURCE_DIR}/src/includes)
+
+target_link_libraries(app
   PRIVATE
-  cpr::cpr
-  argparse::argparse
+  cpr
+  argparse
 )
 

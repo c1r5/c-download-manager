@@ -1,5 +1,4 @@
-#include "download_manager.hpp"
-#include <memory>
+#include "download_manager.h"
 
 int main(int argc, char *argv[]) {
 	return DownloadManager::run(argc, argv);
