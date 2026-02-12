@@ -19,7 +19,13 @@ FetchContent_Declare(
   GIT_TAG 1.11.1
 )
 
-FetchContent_MakeAvailable(argparse cpr)
+FetchContent_Declare(
+  ftxui
+  GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui.git
+  GIT_TAG v5.0.0
+)
+
+FetchContent_MakeAvailable(argparse cpr ftxui)
 
 file(GLOB SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
@@ -31,5 +37,8 @@ target_link_libraries(app
   PRIVATE
   cpr
   argparse
+  ftxui::screen
+  ftxui::dom
+  ftxui::component
 )
 

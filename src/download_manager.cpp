@@ -2,6 +2,7 @@
 #include "config.h"
 #include "downloader.h"
 #include "structs.h"
+#include "ui.h"
 #include <argparse/argparse.hpp>
 #include <cstdlib>
 #include <filesystem>
@@ -9,7 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include "ui.h"
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -64,10 +65,17 @@ int DownloadManager::run(int argc, char *argv[]) {
 	}
 
 	DownloadOptions options {info.url, output_file, info.content_size};
-  DownloadManagerUI ui {};
+	DownloadManagerUI ui {};
 
-  downloader->add_observer(&ui);
-	downloader->download(options);
+	downloader->add_observer(&ui);
+
+	std::thread download_thread([&downloader, &options]() {
+		downloader->download(options);
+	});
+
+	ui.run(info.filename);
+
+	download_thread.join();
 
 	return EXIT_SUCCESS;
 }
