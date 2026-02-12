@@ -13,7 +13,7 @@
 using namespace download_manager::utils;
 
 PreDownloadInfo PreDownloadInfo::check_info(const std::string &url, const bool &header_only) {
-  PreDownloadInfo info{ false, 0, url};
+  PreDownloadInfo info{ false, 0, url, ""};
 
 	try {
 		const auto response = cpr::Head(cpr::Url{url}, cpr::Header{{"Accept-Encoding", "identity"}});
@@ -29,6 +29,14 @@ PreDownloadInfo PreDownloadInfo::check_info(const std::string &url, const bool &
 			try {
 				info.content_size = static_cast<size_t>(std::stoull(it->second));
 			} catch (...) {}
+		}
+
+		if (const auto it = response.header.find("Content-Disposition"); it != response.header.end()) {
+			info.filename = extract_filename_from_header(it->second);
+		}
+
+		if (info.filename.empty()) {
+			info.filename = extract_filename_from_url(url);
 		}
 	} catch (const std::exception &err) {
 		std::cerr << err.what() << std::endl;

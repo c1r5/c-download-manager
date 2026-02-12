@@ -19,6 +19,7 @@ struct PreDownloadInfo {
     bool accept_ranges;
     size_t content_size;
     std::string url;
+    std::string filename;
 
     static PreDownloadInfo check_info(const std::string &url, const bool &header_only = false);
 };
@@ -39,6 +40,7 @@ inline std::ostream& operator<<(std::ostream& os, const PreDownloadInfo& info) {
        << "accept_ranges=" << std::boolalpha << info.accept_ranges
        << ", content_size=" << info.content_size
        << ", url=" << info.url
+       << ", filename=" << info.filename
        << "}";
     return os;
 }

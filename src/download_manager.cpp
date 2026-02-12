@@ -3,27 +3,27 @@
 #include "downloader.h"
 #include "structs.h"
 #include <argparse/argparse.hpp>
-#include <cpr/api.h>
-#include <cpr/cprtypes.h>
-#include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <ostream>
-#include <sstream>
 #include <string>
 #include "ui.h"
+
+namespace fs = std::filesystem;
 
 DownloadManager::DownloadManager() = default;
 
 int DownloadManager::run(int argc, char *argv[]) {
   argparse::ArgumentParser program("app");
 
-	program.add_argument("--url").help("url");
+	program.add_argument("--url").help("url do download");
   program.add_argument("--header").flag();
-  program.add_argument("--output").help("output file");
-	
+  program.add_argument("--output")
+    .help("pasta de destino do download")
+    .default_value(std::string("."));
+
   try {
 		program.parse_args(argc, argv);
 	} catch (const std::exception &err) {
@@ -40,7 +40,15 @@ int DownloadManager::run(int argc, char *argv[]) {
 
 	if (header_only) return EXIT_SUCCESS;
 
-	const auto output_file = program.get<std::string>("--output");
+	auto output_dir = program.get<std::string>("--output");
+
+	if (!fs::is_directory(output_dir)) {
+		std::cerr << "Caminho invalido: " << output_dir << " nao e uma pasta valida." << std::endl;
+		std::cerr << "Usando pasta de execucao atual." << std::endl;
+		output_dir = ".";
+	}
+
+	const std::string output_file = (fs::path(output_dir) / info.filename).string();
 
 	std::ofstream file(output_file, std::ios::binary);
 	file.seekp(static_cast<std::streamoff>(info.content_size) - 1);
@@ -53,7 +61,6 @@ int DownloadManager::run(int argc, char *argv[]) {
 	} else {
 		downloader = std::make_unique<SingleDownloader>();
 	}
- 
 
 	DownloadOptions options {info.url, output_file, info.content_size};
   DownloadManagerUI ui {};
