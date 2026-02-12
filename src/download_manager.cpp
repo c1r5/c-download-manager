@@ -1,5 +1,5 @@
 #include "download_manager.h"
-#include "constants.h"
+#include "config.h"
 #include "downloader.h"
 #include "structs.h"
 #include <argparse/argparse.hpp>
@@ -35,6 +35,7 @@ int DownloadManager::run(int argc, char *argv[]) {
 
 	const auto url = program.get<std::string>("--url");
 	const auto header_only = program.get<bool>("--header");
+	const AppConfig config = AppConfig::load();
 
 	const PreDownloadInfo info = PreDownloadInfo::check_info(url, header_only);
 
@@ -57,7 +58,7 @@ int DownloadManager::run(int argc, char *argv[]) {
 
 	std::unique_ptr<DefaultDownloader> downloader;
 	if (should_split(info.content_size, info.accept_ranges)) {
-		downloader = std::make_unique<ParalellDownloader>(constants::MAX_CONNECTIONS);
+		downloader = std::make_unique<ParalellDownloader>(config.max_connections);
 	} else {
 		downloader = std::make_unique<SingleDownloader>();
 	}
