@@ -4,6 +4,7 @@
 #ifndef CDOWNLOAD_MANAGER_STRUCTS_H
 #define CDOWNLOAD_MANAGER_STRUCTS_H
 
+#include <map>
 #include <ostream>
 #include <string>
 
@@ -51,6 +52,27 @@ struct DownloadEvent {
     size_t total_bytes;
     double elapsed_seconds;
     int thread_id = -1;
+};
+
+struct ThreadState {
+    DownloadStatus status = PENDING;
+    size_t bytes_downloaded = 0;
+    size_t total_bytes = 0;
+    double elapsed_seconds = 0.0;
+};
+
+struct DownloadEntry {
+    int id;
+    std::string url;
+    std::string filename;
+    std::string output_dir;
+    std::string output_path;
+    bool accept_ranges = false;
+    size_t content_size = 0;
+    DownloadStatus status = PENDING;
+    size_t bytes_downloaded = 0;
+    double elapsed_seconds = 0.0;
+    std::map<int, ThreadState> threads;
 };
 
 #endif //CDOWNLOAD_MANAGER_STRUCTS_H

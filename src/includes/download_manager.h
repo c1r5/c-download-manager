@@ -7,10 +7,10 @@
 #include <cpr/range.h>
 
 class DownloadManager {
-	static bool should_split(size_t size, bool accept_ranges);
 public:
-	DownloadManager();	
+	DownloadManager();
 	static int run(int argc, char *argv[]);
+	static bool should_split(size_t size, bool accept_ranges);
 	~DownloadManager();
 };
 

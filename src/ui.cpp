@@ -1,13 +1,21 @@
 #include "ui.h"
+#include "download_manager.h"
+#include "downloader.h"
+#include "structs.h"
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <memory>
 #include <sstream>
+#include <spdlog/spdlog.h>
 
 using namespace ftxui;
+namespace fs = std::filesystem;
 
 static std::string format_bytes(size_t bytes) {
     std::ostringstream oss;
@@ -34,140 +42,386 @@ static std::string format_time(double seconds) {
 
 static std::string status_to_string(DownloadStatus s) {
     switch (s) {
-        case PENDING:  return "PENDING";
-        case STARTED:  return "STARTED";
-        case RUNNING:  return "RUNNING";
-        case FINISHED: return "FINISHED";
-        case FAILED:   return "FAILED";
-        default:       return "UNKNOWN";
+        case PENDING:  return "PENDENTE";
+        case STARTED:  return "INICIANDO";
+        case RUNNING:  return "BAIXANDO";
+        case FINISHED: return "CONCLUIDO";
+        case FAILED:   return "FALHOU";
+        default:       return "DESCONHECIDO";
     }
 }
 
-void DownloadManagerUI::on_update(const DownloadEvent& event) {
+AppUI::AppUI(AppConfig config)
+    : config_(config)
+    , cfg_connections_(std::to_string(config.max_connections))
+    , cfg_downloads_(std::to_string(config.max_downloads))
+    , cfg_retries_(std::to_string(config.max_retries))
+    , cfg_output_dir_(config.output_dir)
+{}
+
+void AppUI::submit_url() {
+    std::lock_guard lock(mutex_);
+    if (url_input_.empty()) return;
+
+    auto entry = std::make_unique<DownloadEntry>();
+    entry->id = next_id_++;
+    entry->url = url_input_;
+    entry->output_dir = cfg_output_dir_.empty() ? "." : cfg_output_dir_;
+    entry->status = PENDING;
+    downloads_.push_back(std::move(entry));
+    selected_ = static_cast<int>(downloads_.size()) - 1;
+    url_input_.clear();
+
+    try_start_queued();
+}
+
+void AppUI::start_download(DownloadEntry* entry) {
+    auto callback = [this](int id, const DownloadEvent& event) {
+        on_download_event(id, event);
+    };
+
+    int entry_id = entry->id;
+    std::string url = entry->url;
+    std::string output_dir = entry->output_dir;
+    int max_connections = config_.max_connections;
+
+    spdlog::info("download enfileirado: id={} url={}", entry_id, url);
+
+    download_threads_.emplace_back([this, entry, entry_id, url, output_dir, max_connections, callback]() {
+        PreDownloadInfo info = PreDownloadInfo::check_info(url, false);
+
+        {
+            std::lock_guard lock(mutex_);
+            entry->filename = info.filename;
+            entry->content_size = info.content_size;
+            entry->accept_ranges = info.accept_ranges;
+            entry->output_path = (fs::path(output_dir) / info.filename).string();
+            entry->status = STARTED;
+        }
+
+        if (screen_) screen_->Post(Event::Custom);
+
+        // Pre-allocate file
+        {
+            std::ofstream file(entry->output_path, std::ios::binary);
+            if (!file.is_open()) {
+                spdlog::error("falha na pre-alocacao do arquivo: {}", entry->output_path);
+            }
+            if (info.content_size > 0) {
+                file.seekp(static_cast<std::streamoff>(info.content_size) - 1);
+                file.write("", 1);
+            }
+            file.close();
+        }
+
+        std::unique_ptr<DefaultDownloader> downloader;
+        if (DownloadManager::should_split(info.content_size, info.accept_ranges)) {
+            downloader = std::make_unique<ParalellDownloader>(max_connections);
+        } else {
+            downloader = std::make_unique<SingleDownloader>();
+        }
+
+        auto adapter = std::make_unique<DownloadObserverAdapter>(entry_id, callback);
+        downloader->add_observer(adapter.get());
+
+        DownloadOptions options{info.url, entry->output_path, info.content_size};
+        downloader->download(options);
+    });
+}
+
+void AppUI::on_download_event(int download_id, const DownloadEvent& event) {
     std::lock_guard lock(mutex_);
 
+    DownloadEntry* entry = nullptr;
+    for (auto& d : downloads_) {
+        if (d->id == download_id) {
+            entry = d.get();
+            break;
+        }
+    }
+    if (!entry) return;
+
     if (event.thread_id >= 0) {
-        auto& ts = threads_[event.thread_id];
+        auto& ts = entry->threads[event.thread_id];
         ts.status = event.status;
         ts.bytes_downloaded = event.bytes_downloaded;
         ts.total_bytes = event.total_bytes;
         ts.elapsed_seconds = event.elapsed_seconds;
-    } else {
-        status_ = event.status;
-        total_bytes_ = event.total_bytes;
-        elapsed_seconds_ = event.elapsed_seconds;
     }
 
-    if (screen_) {
-        screen_->Post(Event::Custom);
+    entry->status = event.status;
+    entry->elapsed_seconds = event.elapsed_seconds;
+
+    size_t total_downloaded = 0;
+    for (const auto& [tid, ts] : entry->threads) {
+        total_downloaded += ts.bytes_downloaded;
+    }
+    entry->bytes_downloaded = total_downloaded;
+
+    if (event.status == FINISHED || event.status == FAILED) {
+        spdlog::debug("evento: id={} status={} thread={}", download_id,
+            event.status == FINISHED ? "FINISHED" : "FAILED", event.thread_id);
+        try_start_queued();
+    }
+
+    if (screen_) screen_->Post(Event::Custom);
+}
+
+void AppUI::try_start_queued() {
+    int active = 0;
+    for (const auto& d : downloads_) {
+        if (d->status == STARTED || d->status == RUNNING) {
+            active++;
+        }
+    }
+
+    int max_dl = config_.max_downloads;
+    for (auto& d : downloads_) {
+        if (active >= max_dl) break;
+        if (d->status == PENDING) {
+            d->status = STARTED;
+            start_download(d.get());
+            active++;
+        }
     }
 }
 
-void DownloadManagerUI::run(const std::string& filename) {
+void AppUI::save_config() {
+    try {
+        config_.max_connections = std::stoi(cfg_connections_);
+    } catch (...) {}
+    try {
+        config_.max_downloads = std::stoi(cfg_downloads_);
+    } catch (...) {}
+    try {
+        config_.max_retries = std::stoi(cfg_retries_);
+    } catch (...) {}
+    config_.output_dir = cfg_output_dir_.empty() ? "." : cfg_output_dir_;
+    config_.save();
+}
+
+void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
     auto screen = ScreenInteractive::Fullscreen();
     screen_ = &screen;
 
-    auto renderer = Renderer([&] {
-        std::lock_guard lock(mutex_);
+    if (!initial_url.empty()) {
+        auto entry = std::make_unique<DownloadEntry>();
+        entry->id = next_id_++;
+        entry->url = initial_url;
+        entry->output_dir = output_dir;
+        entry->status = PENDING;
+        downloads_.push_back(std::move(entry));
+        try_start_queued();
+    }
 
-        // Compute total bytes downloaded from all threads
-        size_t total_downloaded = 0;
-        for (const auto& [id, ts] : threads_) {
-            total_downloaded += ts.bytes_downloaded;
-        }
+    // --- Left panel: all inputs ---
+    auto url_input = Input(&url_input_, "cole a URL aqui...");
+    auto cfg_conn_input = Input(&cfg_connections_, "8");
+    auto cfg_dl_input = Input(&cfg_downloads_, "3");
+    auto cfg_ret_input = Input(&cfg_retries_, "3");
+    auto cfg_outdir_input = Input(&cfg_output_dir_, ".");
 
-        size_t total = total_bytes_;
-        if (total == 0) {
-            for (const auto& [id, ts] : threads_) {
-                total += ts.total_bytes;
-            }
-        }
-
-        float progress = 0.0f;
-        if (total > 0) {
-            progress = static_cast<float>(total_downloaded) /
-                       static_cast<float>(total);
-        }
-        int percent = static_cast<int>(progress * 100);
-
-        std::string status_str = status_to_string(status_);
-        std::string downloaded_str = format_bytes(total_downloaded);
-        std::string total_str = format_bytes(total);
-        std::string time_str = format_time(elapsed_seconds_);
-
-        Elements content;
-        content.push_back(text("  cdownload-manager") | bold);
-        content.push_back(separator());
-        content.push_back(text("  Arquivo: " + filename));
-        content.push_back(text("  Status:  " + status_str));
-        content.push_back(text(""));
-
-        // Total progress
-        content.push_back(
-            hbox({
-                text("  "),
-                gauge(progress) | flex,
-                text(" " + std::to_string(percent) + "%"),
-            })
-        );
-        content.push_back(
-            text("  " + downloaded_str + " / " + total_str + " | " + time_str)
-        );
-
-        // Per-thread progress
-        if (!threads_.empty()) {
-            content.push_back(text(""));
-            content.push_back(separator());
-            content.push_back(text("  Threads") | bold | dim);
-
-            for (const auto& [id, ts] : threads_) {
-                float t_progress = 0.0f;
-                if (ts.total_bytes > 0) {
-                    t_progress = static_cast<float>(ts.bytes_downloaded) /
-                                 static_cast<float>(ts.total_bytes);
-                }
-                int t_percent = static_cast<int>(t_progress * 100);
-
-                std::string label = "  #" + std::to_string(id);
-
-                Color bar_color = Color::Blue;
-                if (ts.status == FINISHED) bar_color = Color::Green;
-                else if (ts.status == FAILED) bar_color = Color::Red;
-
-                content.push_back(
-                    hbox({
-                        text(label) | size(WIDTH, EQUAL, 6),
-                        gauge(t_progress) | flex | color(bar_color),
-                        text(" " + std::to_string(t_percent) + "%") | size(WIDTH, EQUAL, 5),
-                        text(" " + format_bytes(ts.bytes_downloaded) + "/" +
-                             format_bytes(ts.total_bytes)),
-                    })
-                );
-            }
-        }
-
-        content.push_back(text(""));
-
-        if (confirming_exit_) {
-            content.push_back(text("  Download em andamento!") | bold | color(Color::Yellow));
-            content.push_back(text("  Tem certeza que deseja sair? (s/n)") | color(Color::Yellow));
-        } else if (status_ == FINISHED) {
-            content.push_back(text("  Download concluido!") | bold | color(Color::Green));
-            content.push_back(text("  Pressione 'q' para sair"));
-        } else if (status_ == FAILED) {
-            content.push_back(text("  Download falhou!") | bold | color(Color::Red));
-            content.push_back(text("  Pressione 'q' para sair"));
-        } else {
-            content.push_back(text("  Pressione 'q' para sair"));
-        }
-
-        return vbox(content) | border;
+    auto all_inputs = Container::Vertical({
+        url_input,
+        cfg_conn_input,
+        cfg_dl_input,
+        cfg_ret_input,
+        cfg_outdir_input,
     });
 
-    auto component = CatchEvent(renderer, [&](Event event) {
-        if (event == Event::Character('q') || event == Event::Character('Q')) {
+    // Guard: block all input when not in edit mode, ESC exits edit mode
+    auto inputs_guarded = CatchEvent(all_inputs, [&](Event event) {
+        if (!editing_config_) return true;
+        if (event == Event::Escape) {
+            editing_config_ = false;
+            save_config();
+            return true;
+        }
+        if (event == Event::Return) {
+            submit_url();
+            return true;
+        }
+        return false;
+    });
+
+    auto left_panel = Container::Vertical({
+        inputs_guarded,
+    });
+
+    auto left_renderer = Renderer(left_panel, [&] {
+        std::string mode_label = editing_config_
+            ? " configs [EDITANDO] "
+            : " configs ";
+
+        auto render_field = [&](const std::string& label, Component& input, const std::string& value) -> Element {
+            if (editing_config_) {
+                return hbox({text(" " + label), input->Render() | flex});
+            }
+            return hbox({text(" " + label), text(value) | dim});
+        };
+
+        Element url_field;
+        if (editing_config_) {
+            url_field = hbox({text(" URL "), url_input->Render() | flex});
+        } else {
+            std::string display = url_input_.empty() ? "cole a URL aqui..." : url_input_;
+            url_field = hbox({text(" URL "), text(display) | dim | flex});
+        }
+
+        return vbox({
+            window(text(" home "), vbox({url_field})),
+            window(text(mode_label), vbox({
+                render_field("conexoes:   ", cfg_conn_input, cfg_connections_),
+                render_field("downloads:  ", cfg_dl_input, cfg_downloads_),
+                render_field("tentativas: ", cfg_ret_input, cfg_retries_),
+                render_field("saida:      ", cfg_outdir_input, cfg_output_dir_),
+            })),
+        }) | size(WIDTH, EQUAL, 40);
+    });
+
+    // --- Right panel: toggle tabs ---
+    std::vector<std::string> tab_labels = {"progresso", "detalhes"};
+    auto tab_toggle = Toggle(&tab_labels, &detail_tab_);
+
+    auto right_panel = Container::Vertical({
+        tab_toggle,
+    });
+
+    auto right_renderer = Renderer(right_panel, [&] {
+        std::lock_guard lock(mutex_);
+
+        Elements download_list;
+        for (int i = 0; i < static_cast<int>(downloads_.size()); i++) {
+            const auto& d = downloads_[i];
+            std::string name = d->filename.empty() ? d->url : d->filename;
+            if (name.size() > 40) name = name.substr(0, 37) + "...";
+
+            float progress = 0.0f;
+            if (d->content_size > 0) {
+                progress = static_cast<float>(d->bytes_downloaded) /
+                           static_cast<float>(d->content_size);
+            }
+            int percent = static_cast<int>(progress * 100);
+
+            auto item = vbox({
+                text(" " + name) | bold,
+                hbox({
+                    text(" "),
+                    gauge(progress) | flex,
+                    text(" " + std::to_string(percent) + "% "),
+                }),
+            });
+
+            if (i == selected_) {
+                item = item | inverted;
+            }
+            download_list.push_back(item);
+        }
+
+        if (download_list.empty()) {
+            download_list.push_back(
+                text(" nenhum download") | dim | center
+            );
+        }
+
+        // Tab content for selected download
+        Element tab_content;
+        if (selected_ >= 0 && selected_ < static_cast<int>(downloads_.size())) {
+            const auto& sel = downloads_[selected_];
+
+            if (detail_tab_ == 0) {
+                // Progress tab - per-thread gauges
+                Elements thread_rows;
+                if (sel->threads.empty()) {
+                    thread_rows.push_back(text(" aguardando threads...") | dim);
+                } else {
+                    for (const auto& [tid, ts] : sel->threads) {
+                        float t_progress = 0.0f;
+                        if (ts.total_bytes > 0) {
+                            t_progress = static_cast<float>(ts.bytes_downloaded) /
+                                         static_cast<float>(ts.total_bytes);
+                        }
+                        int t_percent = static_cast<int>(t_progress * 100);
+
+                        Color bar_color = Color::Blue;
+                        if (ts.status == FINISHED) bar_color = Color::Green;
+                        else if (ts.status == FAILED) bar_color = Color::Red;
+
+                        thread_rows.push_back(hbox({
+                            text(" #" + std::to_string(tid)) | size(WIDTH, EQUAL, 5),
+                            gauge(t_progress) | flex | color(bar_color),
+                            text(" " + std::to_string(t_percent) + "%") | size(WIDTH, EQUAL, 5),
+                            text(" " + format_bytes(ts.bytes_downloaded) + "/" + format_bytes(ts.total_bytes)),
+                        }));
+                    }
+                }
+                tab_content = vbox(thread_rows);
+            } else {
+                // Details tab
+                tab_content = vbox({
+                    text(" arquivo:       " + sel->filename),
+                    text(" url:           " + sel->url),
+                    text(" diretorio:     " + sel->output_dir),
+                    text(" tamanho:       " + format_bytes(sel->content_size)),
+                    text(" accept_ranges: " + std::string(sel->accept_ranges ? "sim" : "nao")),
+                    text(" status:        " + status_to_string(sel->status)),
+                    text(" tempo:         " + format_time(sel->elapsed_seconds)),
+                    text(" baixado:       " + format_bytes(sel->bytes_downloaded)),
+                });
+            }
+        } else {
+            tab_content = text(" selecione um download") | dim;
+        }
+
+        return window(text(" monitor "), vbox({
+            vbox(download_list) | vscroll_indicator | yframe | flex,
+            separator(),
+            hbox({text(" "), tab_toggle->Render()}),
+            separator(),
+            tab_content | flex,
+        })) | flex;
+    });
+
+    // --- Main layout ---
+    auto main_container = Container::Horizontal({
+        left_renderer,
+        right_renderer,
+    });
+
+    auto main_renderer = Renderer(main_container, [&] {
+        auto content = hbox({
+            left_renderer->Render(),
+            right_renderer->Render() | flex,
+        });
+
+        std::string status_text = " q: Sair | i: Editar | Up/Down: Navegar";
+        if (confirming_exit_) {
+            status_text = " Download em andamento! Sair? (s/n)";
+        } else if (editing_config_) {
+            status_text = " EDITANDO | Enter: Download | ESC: Voltar";
+        }
+
+        return vbox({
+            text(" cdownload-manager") | bold | hcenter,
+            separator(),
+            content | flex,
+            separator(),
+            text(status_text) | bgcolor(Color::Green) | color(Color::White),
+        }) | border;
+    });
+
+    auto component = CatchEvent(main_renderer, [&](Event event) {
+        if (event == Event::Special("\x71")) { // Ctrl+Q
             std::lock_guard lock(mutex_);
-            if (status_ == FINISHED || status_ == FAILED) {
+            bool has_active = false;
+            for (const auto& d : downloads_) {
+                if (d->status == STARTED || d->status == RUNNING || d->status == PENDING) {
+                    has_active = true;
+                    break;
+                }
+            }
+            if (!has_active) {
+                save_config();
                 screen.Exit();
                 return true;
             }
@@ -178,14 +432,33 @@ void DownloadManagerUI::run(const std::string& filename) {
         if (confirming_exit_) {
             if (event == Event::Character('s') || event == Event::Character('S') ||
                 event == Event::Character('y') || event == Event::Character('Y')) {
+                save_config();
                 screen.Exit();
                 return true;
             }
             if (event == Event::Character('n') || event == Event::Character('N')) {
-                std::lock_guard lock(mutex_);
                 confirming_exit_ = false;
                 return true;
             }
+            return true;
+        }
+
+        if (event == Event::Character('i') || event == Event::Character('I')) {
+            if (!editing_config_) {
+                editing_config_ = true;
+                return true;
+            }
+        }
+
+        if (event == Event::ArrowUp) {
+            std::lock_guard lock(mutex_);
+            if (selected_ > 0) selected_--;
+            return true;
+        }
+        if (event == Event::ArrowDown) {
+            std::lock_guard lock(mutex_);
+            if (selected_ < static_cast<int>(downloads_.size()) - 1) selected_++;
+            return true;
         }
 
         return false;
@@ -193,4 +466,8 @@ void DownloadManagerUI::run(const std::string& filename) {
 
     screen.Loop(component);
     screen_ = nullptr;
+
+    for (auto& t : download_threads_) {
+        if (t.joinable()) t.join();
+    }
 }

@@ -1,88 +1,68 @@
 #include "download_manager.h"
 #include "config.h"
-#include "downloader.h"
-#include "structs.h"
 #include "ui.h"
 #include <argparse/argparse.hpp>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <memory>
 #include <string>
-#include <thread>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 
 namespace fs = std::filesystem;
 
 DownloadManager::DownloadManager() = default;
 
 int DownloadManager::run(int argc, char *argv[]) {
-  argparse::ArgumentParser program("app");
+    auto logger = spdlog::rotating_logger_mt("app", "cdownload.log", 5 * 1024 * 1024, 2);
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::debug);
+    spdlog::info("cdownload-manager iniciado");
 
-	program.add_argument("--url").help("url do download");
-  program.add_argument("--header").flag();
-  program.add_argument("--output")
-    .help("pasta de destino do download")
-    .default_value(std::string("."));
+    argparse::ArgumentParser program("app");
 
-  try {
-		program.parse_args(argc, argv);
-	} catch (const std::exception &err) {
-		std::cerr << err.what() << std::endl;
-		std::cerr << program;
-		std::cout << program.help().str() << std::endl;
-		return 1;
-	}
+    program.add_argument("--url")
+        .help("url do download")
+        .default_value(std::string(""));
+    program.add_argument("--header").flag();
+    program.add_argument("--output")
+        .help("pasta de destino do download")
+        .default_value(std::string("."));
 
-	const auto url = program.get<std::string>("--url");
-	const auto header_only = program.get<bool>("--header");
-	const AppConfig config = AppConfig::load();
+    try {
+        program.parse_args(argc, argv);
+    } catch (const std::exception &err) {
+        spdlog::error("erro ao parsear argumentos: {}", err.what());
+        std::cout << program.help().str() << std::endl;
+        return 1;
+    }
 
-	const PreDownloadInfo info = PreDownloadInfo::check_info(url, header_only);
+    const auto url = program.get<std::string>("--url");
+    const auto header_only = program.get<bool>("--header");
+    spdlog::info("args: url={}, header_only={}", url, header_only);
 
-	if (header_only) return EXIT_SUCCESS;
+    if (header_only && !url.empty()) {
+        PreDownloadInfo::check_info(url, true);
+        return EXIT_SUCCESS;
+    }
 
-	auto output_dir = program.get<std::string>("--output");
+    auto output_dir = program.get<std::string>("--output");
 
-	if (!fs::is_directory(output_dir)) {
-		std::cerr << "Caminho invalido: " << output_dir << " nao e uma pasta valida." << std::endl;
-		std::cerr << "Usando pasta de execucao atual." << std::endl;
-		output_dir = ".";
-	}
+    if (!fs::is_directory(output_dir)) {
+        spdlog::warn("caminho invalido: {} nao e uma pasta valida, usando pasta atual", output_dir);
+        output_dir = ".";
+    }
 
-	const std::string output_file = (fs::path(output_dir) / info.filename).string();
+    const AppConfig config = AppConfig::load();
+    AppUI ui(config);
+    ui.run(url, output_dir);
 
-	std::ofstream file(output_file, std::ios::binary);
-	file.seekp(static_cast<std::streamoff>(info.content_size) - 1);
-	file.write("", 1);
-	file.close();
-
-	std::unique_ptr<DefaultDownloader> downloader;
-	if (should_split(info.content_size, info.accept_ranges)) {
-		downloader = std::make_unique<ParalellDownloader>(config.max_connections);
-	} else {
-		downloader = std::make_unique<SingleDownloader>();
-	}
-
-	DownloadOptions options {info.url, output_file, info.content_size};
-	DownloadManagerUI ui {};
-
-	downloader->add_observer(&ui);
-
-	std::thread download_thread([&downloader, &options]() {
-		downloader->download(options);
-	});
-
-	ui.run(info.filename);
-
-	download_thread.join();
-
-	return EXIT_SUCCESS;
+    return EXIT_SUCCESS;
 }
 
 bool DownloadManager::should_split(const size_t size, const bool accept_ranges) {
-	constexpr size_t MIN_SPLIT_SIZE = 5 * 1024 * 1024; // 5MB
-	return accept_ranges && size >= MIN_SPLIT_SIZE;
+    constexpr size_t MIN_SPLIT_SIZE = 5 * 1024 * 1024; // 5MB
+    return accept_ranges && size >= MIN_SPLIT_SIZE;
 }
 
 DownloadManager::~DownloadManager() = default;
