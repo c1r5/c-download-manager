@@ -6,12 +6,19 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 
 namespace fs = std::filesystem;
 
 DownloadManager::DownloadManager() = default;
 
 int DownloadManager::run(int argc, char *argv[]) {
+    auto logger = spdlog::rotating_logger_mt("app", "cdownload.log", 5 * 1024 * 1024, 2);
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::debug);
+    spdlog::info("cdownload-manager iniciado");
+
     argparse::ArgumentParser program("app");
 
     program.add_argument("--url")
@@ -25,14 +32,14 @@ int DownloadManager::run(int argc, char *argv[]) {
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception &err) {
-        std::cerr << err.what() << std::endl;
-        std::cerr << program;
+        spdlog::error("erro ao parsear argumentos: {}", err.what());
         std::cout << program.help().str() << std::endl;
         return 1;
     }
 
     const auto url = program.get<std::string>("--url");
     const auto header_only = program.get<bool>("--header");
+    spdlog::info("args: url={}, header_only={}", url, header_only);
 
     if (header_only && !url.empty()) {
         PreDownloadInfo::check_info(url, true);
@@ -42,8 +49,7 @@ int DownloadManager::run(int argc, char *argv[]) {
     auto output_dir = program.get<std::string>("--output");
 
     if (!fs::is_directory(output_dir)) {
-        std::cerr << "Caminho invalido: " << output_dir << " nao e uma pasta valida." << std::endl;
-        std::cerr << "Usando pasta de execucao atual." << std::endl;
+        spdlog::warn("caminho invalido: {} nao e uma pasta valida, usando pasta atual", output_dir);
         output_dir = ".";
     }
 

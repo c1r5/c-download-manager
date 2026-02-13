@@ -46,8 +46,10 @@ private:
     std::string cfg_connections_;
     std::string cfg_downloads_;
     std::string cfg_retries_;
+    std::string cfg_output_dir_;
     int detail_tab_ = 0;
     bool confirming_exit_ = false;
+    bool editing_config_ = false;
 
     void submit_url();
     void start_download(DownloadEntry* entry);

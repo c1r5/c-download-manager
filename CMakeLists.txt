@@ -25,7 +25,13 @@ FetchContent_Declare(
   GIT_TAG v5.0.0
 )
 
-FetchContent_MakeAvailable(argparse cpr ftxui)
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog.git
+  GIT_TAG v1.15.0
+)
+
+FetchContent_MakeAvailable(argparse cpr ftxui spdlog)
 
 file(GLOB SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
@@ -40,5 +46,6 @@ target_link_libraries(app
   ftxui::screen
   ftxui::dom
   ftxui::component
+  spdlog::spdlog
 )
 

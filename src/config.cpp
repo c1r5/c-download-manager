@@ -2,8 +2,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <string>
+#include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 
@@ -38,8 +38,9 @@ AppConfig AppConfig::load() {
             if (key == "max_connections") config.max_connections = std::stoi(value);
             else if (key == "max_downloads") config.max_downloads = std::stoi(value);
             else if (key == "max_retries") config.max_retries = std::stoi(value);
+            else if (key == "output_dir") config.output_dir = value;
         } catch (const std::exception& e) {
-            std::cerr << "Erro ao ler config '" << key << "': " << e.what() << std::endl;
+            spdlog::warn("erro ao ler config '{}': {}", key, e.what());
         }
     }
 
@@ -54,4 +55,5 @@ void AppConfig::save() const {
     file << "max_connections=" << max_connections << std::endl;
     file << "max_downloads=" << max_downloads << std::endl;
     file << "max_retries=" << max_retries << std::endl;
+    file << "output_dir=" << output_dir << std::endl;
 }

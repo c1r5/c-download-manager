@@ -7,6 +7,7 @@ struct AppConfig {
     int max_connections = 8;
     int max_downloads = 3;
     int max_retries = 3;
+    std::string output_dir = ".";
 
     static AppConfig load();
     void save() const;

@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <memory>
 #include <sstream>
+#include <spdlog/spdlog.h>
 
 using namespace ftxui;
 namespace fs = std::filesystem;
@@ -55,6 +56,7 @@ AppUI::AppUI(AppConfig config)
     , cfg_connections_(std::to_string(config.max_connections))
     , cfg_downloads_(std::to_string(config.max_downloads))
     , cfg_retries_(std::to_string(config.max_retries))
+    , cfg_output_dir_(config.output_dir)
 {}
 
 void AppUI::submit_url() {
@@ -64,7 +66,7 @@ void AppUI::submit_url() {
     auto entry = std::make_unique<DownloadEntry>();
     entry->id = next_id_++;
     entry->url = url_input_;
-    entry->output_dir = ".";
+    entry->output_dir = cfg_output_dir_.empty() ? "." : cfg_output_dir_;
     entry->status = PENDING;
     downloads_.push_back(std::move(entry));
     selected_ = static_cast<int>(downloads_.size()) - 1;
@@ -83,6 +85,8 @@ void AppUI::start_download(DownloadEntry* entry) {
     std::string output_dir = entry->output_dir;
     int max_connections = config_.max_connections;
 
+    spdlog::info("download enfileirado: id={} url={}", entry_id, url);
+
     download_threads_.emplace_back([this, entry, entry_id, url, output_dir, max_connections, callback]() {
         PreDownloadInfo info = PreDownloadInfo::check_info(url, false);
 
@@ -100,6 +104,9 @@ void AppUI::start_download(DownloadEntry* entry) {
         // Pre-allocate file
         {
             std::ofstream file(entry->output_path, std::ios::binary);
+            if (!file.is_open()) {
+                spdlog::error("falha na pre-alocacao do arquivo: {}", entry->output_path);
+            }
             if (info.content_size > 0) {
                 file.seekp(static_cast<std::streamoff>(info.content_size) - 1);
                 file.write("", 1);
@@ -152,6 +159,8 @@ void AppUI::on_download_event(int download_id, const DownloadEvent& event) {
     entry->bytes_downloaded = total_downloaded;
 
     if (event.status == FINISHED || event.status == FAILED) {
+        spdlog::debug("evento: id={} status={} thread={}", download_id,
+            event.status == FINISHED ? "FINISHED" : "FAILED", event.thread_id);
         try_start_queued();
     }
 
@@ -187,6 +196,7 @@ void AppUI::save_config() {
     try {
         config_.max_retries = std::stoi(cfg_retries_);
     } catch (...) {}
+    config_.output_dir = cfg_output_dir_.empty() ? "." : cfg_output_dir_;
     config_.save();
 }
 
@@ -204,9 +214,29 @@ void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
         try_start_queued();
     }
 
-    // --- Left panel: URL input ---
+    // --- Left panel: all inputs ---
     auto url_input = Input(&url_input_, "cole a URL aqui...");
-    auto url_with_enter = CatchEvent(url_input, [&](Event event) {
+    auto cfg_conn_input = Input(&cfg_connections_, "8");
+    auto cfg_dl_input = Input(&cfg_downloads_, "3");
+    auto cfg_ret_input = Input(&cfg_retries_, "3");
+    auto cfg_outdir_input = Input(&cfg_output_dir_, ".");
+
+    auto all_inputs = Container::Vertical({
+        url_input,
+        cfg_conn_input,
+        cfg_dl_input,
+        cfg_ret_input,
+        cfg_outdir_input,
+    });
+
+    // Guard: block all input when not in edit mode, ESC exits edit mode
+    auto inputs_guarded = CatchEvent(all_inputs, [&](Event event) {
+        if (!editing_config_) return true;
+        if (event == Event::Escape) {
+            editing_config_ = false;
+            save_config();
+            return true;
+        }
         if (event == Event::Return) {
             submit_url();
             return true;
@@ -214,33 +244,39 @@ void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
         return false;
     });
 
-    // --- Left panel: Config inputs ---
-    auto cfg_conn_input = Input(&cfg_connections_, "8");
-    auto cfg_dl_input = Input(&cfg_downloads_, "3");
-    auto cfg_ret_input = Input(&cfg_retries_, "3");
-
-    auto config_container = Container::Vertical({
-        cfg_conn_input,
-        cfg_dl_input,
-        cfg_ret_input,
-    });
-
     auto left_panel = Container::Vertical({
-        url_with_enter,
-        config_container,
+        inputs_guarded,
     });
 
     auto left_renderer = Renderer(left_panel, [&] {
+        std::string mode_label = editing_config_
+            ? " configs [EDITANDO] "
+            : " configs ";
+
+        auto render_field = [&](const std::string& label, Component& input, const std::string& value) -> Element {
+            if (editing_config_) {
+                return hbox({text(" " + label), input->Render() | flex});
+            }
+            return hbox({text(" " + label), text(value) | dim});
+        };
+
+        Element url_field;
+        if (editing_config_) {
+            url_field = hbox({text(" URL "), url_input->Render() | flex});
+        } else {
+            std::string display = url_input_.empty() ? "cole a URL aqui..." : url_input_;
+            url_field = hbox({text(" URL "), text(display) | dim | flex});
+        }
+
         return vbox({
-            window(text(" home "), vbox({
-                hbox({text(" URL "), url_with_enter->Render() | flex}) | size(HEIGHT, EQUAL, 1),
+            window(text(" home "), vbox({url_field})),
+            window(text(mode_label), vbox({
+                render_field("conexoes:   ", cfg_conn_input, cfg_connections_),
+                render_field("downloads:  ", cfg_dl_input, cfg_downloads_),
+                render_field("tentativas: ", cfg_ret_input, cfg_retries_),
+                render_field("saida:      ", cfg_outdir_input, cfg_output_dir_),
             })),
-            window(text(" configs "), vbox({
-                hbox({text(" conexoes:   "), cfg_conn_input->Render() | size(WIDTH, EQUAL, 4)}),
-                hbox({text(" downloads:  "), cfg_dl_input->Render() | size(WIDTH, EQUAL, 4)}),
-                hbox({text(" tentativas: "), cfg_ret_input->Render() | size(WIDTH, EQUAL, 4)}),
-            })),
-        }) | size(WIDTH, EQUAL, 30);
+        }) | size(WIDTH, EQUAL, 40);
     });
 
     // --- Right panel: toggle tabs ---
@@ -358,9 +394,11 @@ void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
             right_renderer->Render() | flex,
         });
 
-        std::string status_text = " Ctrl+Q: Sair | Enter: Download | Up/Down: Navegar";
+        std::string status_text = " q: Sair | i: Editar | Up/Down: Navegar";
         if (confirming_exit_) {
             status_text = " Download em andamento! Sair? (s/n)";
+        } else if (editing_config_) {
+            status_text = " EDITANDO | Enter: Download | ESC: Voltar";
         }
 
         return vbox({
@@ -373,7 +411,7 @@ void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
     });
 
     auto component = CatchEvent(main_renderer, [&](Event event) {
-        if (event == Event::Special("\x11")) { // Ctrl+Q
+        if (event == Event::Special("\x71")) { // Ctrl+Q
             std::lock_guard lock(mutex_);
             bool has_active = false;
             for (const auto& d : downloads_) {
@@ -403,6 +441,13 @@ void AppUI::run(const std::string& initial_url, const std::string& output_dir) {
                 return true;
             }
             return true;
+        }
+
+        if (event == Event::Character('i') || event == Event::Character('I')) {
+            if (!editing_config_) {
+                editing_config_ = true;
+                return true;
+            }
         }
 
         if (event == Event::ArrowUp) {
